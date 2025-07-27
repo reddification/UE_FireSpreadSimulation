@@ -30,10 +30,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(ClampMin = 0.f, UIMin = 0.f))
 	float MaxCombustionLevel = 1.f;
 
+	// personal combustion rate which is multiplied with physics material combustion rate
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(ClampMin = 0.f, UIMin = 0.f))
+	float CombustionRate = 0.25;
+
 public: // ICombustionInterface
-	virtual void AddCombustion(float NewCombustionState) override;
+	virtual void SetCombustion(float NewCombustionState) override;
 	virtual bool IsIgnited() const override;
 	virtual void StartFire() override;
+	virtual float GetCombustionRate() const override;
 	
 private:
 	UPROPERTY(ReplicatedUsing=OnRep_CombustionState)

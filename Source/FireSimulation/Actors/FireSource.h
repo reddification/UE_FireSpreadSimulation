@@ -27,7 +27,7 @@ struct FAsyncFireSpreadResult
 		CombustionActorUpdates.Append(MoveTemp(Other.CombustionActorUpdates));
 		IgnitedCells.Append(MoveTemp(Other.IgnitedCells));
 		NotEdgeCellAnymore.Append(MoveTemp(Other.NotEdgeCellAnymore));
-		// NewCells.Append(MoveTemp(Other.NewCells)); // new cells are appended separately
+		NewCells.Append(MoveTemp(Other.NewCells)); // new cells are usually appended separately
 	}
 };
 
@@ -94,10 +94,11 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bLog_Debug = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bDebug_DontUpdateVFX = false;
+
 private:
 	void OnWindChanged(const FVector& NewWindVector, float NewWindStrength);
-	void HandleCellShapeSweepCompleted(const FTraceHandle& TraceHandle, FTraceDatum& TraceDatum, const FFireCell* CellularAutomataCell);
-	void SweepForCell(const FFireCell* Cell);
 	
 	FVector WindDirection;
 	int WindDirectionQuantized;
@@ -107,9 +108,17 @@ private:
 	UPROPERTY(ReplicatedUsing=OnRep_FireLocations)
 	TArray<FVector> FireLocations;
 
+	// idk i'm too bad with niagara to make a good emitter so if I provide all fire locations and not just new ones - my current "as good as I could" emitter will just spawn all particles and not just new ones
+	// but if i send only new particles - old ones still live. so eh fuck it who am i a technical artist?
+	UPROPERTY(ReplicatedUsing=OnRep_NewFireLocations)
+	TArray<FVector> NewFireLocations;
+	
 	UFUNCTION()
 	void OnRep_FireLocations();
 
+	UFUNCTION()
+	void OnRep_NewFireLocations();
+	
 	void UpdateFireLocations();
 
 	UFUNCTION()
@@ -118,7 +127,7 @@ private:
 	UFUNCTION()
 	void OnSomethingLeftFireVolume(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-	bool GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP, const FIntVector2& CellIndex, FFireCell& OutCell) const;
+	bool GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP, FFireCell& OutCell) const;
 	void PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation, const FCollisionObjectQueryParams& COQP);
 	
 	void SpreadFireAsync();
@@ -140,14 +149,10 @@ private:
 	std::atomic<float> AccumulatedDeltaTime = 0.f;
 	
 	std::atomic<bool> bAsyncUpdateRunning = false;
-	// not sure I really need it 
-	std::atomic<bool> bAsyncBulkCachingRunning = false;
 
 	std::atomic<bool> bPendingProcessFireSpreadResult;
 
 	std::atomic<bool> bLogDebugAtomic;
-	
-	FCriticalSection BulkCacheLock;
 	
 	TMap<FIntVector2, FFireCell> Cells;
 	TSet<FIntVector2> EdgeCells;

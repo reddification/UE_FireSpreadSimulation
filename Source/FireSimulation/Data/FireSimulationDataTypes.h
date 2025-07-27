@@ -21,19 +21,80 @@ struct FPhysicMaterialCombustionParameters
 
 struct FFireCell
 {
-	FFireCell() {  }
-	FFireCell(const FFireCell&);
-	FFireCell& operator=(const FFireCell&);
+    FFireCell()
+    {
+    	CombustionState.store(0.f);
+    };
+
+    FFireCell(const FFireCell& Other) : 
+          CombustionRate(Other.CombustionRate),
+          BurnoutRate(Other.BurnoutRate),
+          FireHeight(Other.FireHeight),
+          Location(Other.Location),
+          CombustibleActor(Other.CombustibleActor),
+          CombustibleInterface(Other.CombustibleInterface),
+          bObstacle(Other.bObstacle),
+          bHasCombustibleInterface(Other.bHasCombustibleInterface)
+    {
+    	CombustionState.store(Other.CombustionState.load());
+    }
+
+    FFireCell& operator=(const FFireCell& Other)
+    {
+        CombustionState.store(Other.CombustionState.load());
+        CombustionRate = Other.CombustionRate;
+        BurnoutRate = Other.BurnoutRate;
+        FireHeight = Other.FireHeight;
+        Location = Other.Location;
+        CombustibleActor = Other.CombustibleActor;
+        CombustibleInterface = Other.CombustibleInterface;
+        bObstacle = Other.bObstacle;
+        bHasCombustibleInterface = Other.bHasCombustibleInterface;
+        return *this;
+    }
+
+    FFireCell(FFireCell&& Other) noexcept
+        :
+          CombustionRate(Other.CombustionRate),
+          BurnoutRate(Other.BurnoutRate),
+          FireHeight(Other.FireHeight),
+          Location(MoveTemp(Other.Location)),
+          CombustibleActor(MoveTemp(Other.CombustibleActor)),
+          CombustibleInterface(MoveTemp(Other.CombustibleInterface)),
+          bObstacle(Other.bObstacle),
+          bHasCombustibleInterface(Other.bHasCombustibleInterface)
+    {
+    	CombustionState.store(Other.CombustionState.load());
+        // Other.CombustionState.store(0.f);
+    }
+
+    FFireCell& operator=(FFireCell&& Other) noexcept
+    {
+        CombustionState.store(Other.CombustionState.load());
+        CombustionRate = Other.CombustionRate;
+        BurnoutRate = Other.BurnoutRate;
+        FireHeight = Other.FireHeight;
+        Location = MoveTemp(Other.Location);
+        CombustibleActor = MoveTemp(Other.CombustibleActor);
+        CombustibleInterface = MoveTemp(Other.CombustibleInterface);
+        bObstacle = Other.bObstacle;
+        bHasCombustibleInterface = Other.bHasCombustibleInterface;
+
+        // Other.CombustionState.store(0.f);
+        return *this;
+    }
+
+    ~FFireCell() = default;
 
 	// this one is local. in theory, there can be multiple AFireSource that affect the same cell. IDK. perhaps make a UFireSubsystem that has like global map of fire cells
 	// but then again - currently fire cells indices are relative to actor root
-	std::atomic<float> CombustionState = 0.f;
+	std::atomic<float> CombustionState;
 	
-	float IgnitionRate = 1.f;
+	float CombustionRate = 1.f;
 	float BurnoutRate = 0.005f;
 	float FireHeight = 100.f; // affects verticality
 
-	FVector Location;
+	FVector Location = FVector::ZeroVector;
 	
 	TWeakObjectPtr<AActor> CombustibleActor;
 	TScriptInterface<ICombustible> CombustibleInterface;
@@ -44,16 +105,4 @@ struct FFireCell
 	bool IsObstacle() const { return bObstacle; }
 	bool IsIgnited() const { return CombustionState.load() >= 1.f; }
 	void SetActor(AActor* Actor);
-};
-
-struct FCellularAutomataPendingNode
-{
-	FFireCell* IgnitedBy;
-	TArray<FFireCell*> Igniting;
-
-	float CombustionState = 0.f;
-	float Offset = 0.f; // using radial coords
-	float CombustionRate = 0.f;
-	TWeakObjectPtr<class UCombustionComponent> CombustionComponent;
-	FVector IgnitionDirection;	
 };

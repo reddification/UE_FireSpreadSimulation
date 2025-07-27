@@ -2,6 +2,7 @@
 
 #include "EnhancedInputComponent.h"
 #include "Interfaces/Combustible.h"
+#include "Subsystems/GlobalFireManagerSubsystem.h"
 
 AFSPawn::AFSPawn()
 {
@@ -29,6 +30,10 @@ void AFSPawn::SetOnFireInput()
 				Combustible->StartFire();
 				bSetOnFire = true;
 			}
+		}
+		else
+		{
+			GetWorld()->GetSubsystem<UGlobalFireManagerSubsystem>()->StartFire(Hit.Location);
 		}
 	}
 
