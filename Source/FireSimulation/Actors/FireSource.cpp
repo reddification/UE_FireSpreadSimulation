@@ -17,9 +17,17 @@
 #include "Settings/FireSimulationSettings.h"
 #include "Subsystems/GlobalFireManagerSubsystem.h"
 
-#define FIRESIM_LOG_ASYNC(Text, Verbosity) if (bLog) \
+#define FIRESIM_LOG_ASYNC(Text, Verbosity) if (bLogDebugAtomic.load()) \
 	{ \
-		AsyncTask(ENamedThreads::GameThread, [this, &]() \
+		AsyncTask(ENamedThreads::GameThread, [this, Text = MoveTemp(Text)]() \
+		{ \
+			UE_VLOG(this, LogFireSimulation, Verbosity, *Text);\
+		}); \
+	} \
+
+#define FIRESIM_LOG_ASYNC_RAW(Text, Verbosity) if (bLogDebugAtomic.load()) \
+	{ \
+		AsyncTask(ENamedThreads::GameThread, [this]() \
 		{ \
 			UE_VLOG(this, LogFireSimulation, Verbosity, Text);\
 		}); \
@@ -73,6 +81,60 @@ void AFireSource::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& Ou
 	DOREPLIFETIME_WITH_PARAMS_FAST(AFireSource, FireLocations, DoRepLifetimeParams);
 }
 
+void AFireSource::CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult)
+{
+	if (AggregatedResult.IgnitedCells.IsEmpty())
+		return;
+
+	int ThreadsCount = FPlatformMisc::NumberOfCoresIncludingHyperthreads();
+
+	const int IgnitedCellsNum = AggregatedResult.IgnitedCells.Num();
+	int BaseBatchSize = IgnitedCellsNum < ThreadsCount ? IgnitedCellsNum : IgnitedCellsNum / ThreadsCount;
+	int BatchStartIndex = 0;
+	int CurrentBatchSize = BaseBatchSize;
+	TArray<TFuture<TMap<FIntVector2, FFireCell>>> AllNewCellsFutures;
+	const auto IgnitedCellsArray = AggregatedResult.IgnitedCells.Array();
+
+	while (BatchStartIndex < IgnitedCellsNum)
+	{
+		CurrentBatchSize = FMath::Min(IgnitedCellsNum - BatchStartIndex, BaseBatchSize);
+		TFuture<TMap<FIntVector2, FFireCell>> Future = Async(EAsyncExecution::ThreadPool, [this, &IgnitedCellsArray, BatchStartIndex, CurrentBatchSize]()
+		{
+			FCollisionObjectQueryParams COQP;
+			COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
+			
+			TMap<FIntVector2, FFireCell> BatchResult;
+			BatchResult.Reserve(CurrentBatchSize * 4); // in general, a cell will have 3 pending neighbors, but edge cells can have 5 
+			int End = BatchStartIndex + CurrentBatchSize;
+			for (int i = BatchStartIndex; i < End; i++)
+			{
+				auto NewFireCellIndex = IgnitedCellsArray[i];
+				for (const auto& RadialDirection : RadialDirections)
+				{
+					auto TestCellIndex = NewFireCellIndex + RadialDirection;
+					if (!Cells.Contains(TestCellIndex))
+					{
+						FFireCell NewCell;
+						GetCell(Cells[NewFireCellIndex].Location, COQP, TestCellIndex, NewCell);
+						BatchResult.Emplace(TestCellIndex, NewCell);
+					}
+				}
+			}
+					
+			return BatchResult;
+		});
+
+		BatchStartIndex += CurrentBatchSize;
+		AllNewCellsFutures.Add(MoveTemp(Future));
+	}
+		
+	for (int i = 0; i < AllNewCellsFutures.Num(); i++)
+	{
+		auto ThreadFireSpreadResult = MoveTemp(AllNewCellsFutures[i].GetMutable());
+		AggregatedResult.NewCells.Append(MoveTemp(ThreadFireSpreadResult));
+	}
+}
+
 // Called when the game starts or when spawned
 void AFireSource::BeginPlay()
 {
@@ -87,6 +149,8 @@ void AFireSource::BeginPlay()
 		// auto RelevantFireSources = GlobalFireManager->GetRelevantFireSources(this, RelevantDistanceToOtherFireSources);
 		// TODO merge cells of relevant fire sources with this fire source cells
 	}
+
+	bLogDebugAtomic.store(bLog_Debug);
 	
 	auto FireSimSettings = GetDefault<UFireSimulationSettings>();
 	SurfacesCombustionParameters = FireSimSettings->CombustionParameters;
@@ -126,7 +190,7 @@ void AFireSource::Tick(float DeltaTime)
 	if (!bAsyncUpdateRunning)
 	{
 		AccumulatedDeltaTime.store(DeltaTime);
-		SpreadFireAsync(bLog_Debug);
+		SpreadFireAsync();
 	}
 	else
 	{
@@ -147,13 +211,35 @@ void AFireSource::UpdateBurningActors()
 	if (PendingBurningActorsUpdates.IsEmpty())
 		return;
 	
-	int UpdateCount = 0;
 	// TODO what if PendingBurningActorUpdates gets new data for the same actor?
-	for (int i = PendingBurningActorsUpdates.Num() - 1; i >= 0 && UpdateCount < MaxActorsUpdatesPerTick; i--, UpdateCount++)
+	// perhaps replace PendingBurningActorsUpdates to TMap<AActor*, float> instead
+	int Index = LastBurningActorUpdateIndex;
+	int Until = FMath::Min(LastBurningActorUpdateIndex + MaxActorsUpdatesPerTick, PendingBurningActorsUpdates.Num());
+	
+	while (Index < Until)
 	{
-		if (auto Cell = Cells.Find(PendingBurningActorsUpdates[i]))
-			if (Cell->CombustibleActor.IsValid())
-				Cell->CombustibleInterface->AddCombustion(Cell->CombustionState.load());
+		auto Cell = Cells.Find(PendingBurningActorsUpdates[Index]);
+		if (!ensure(Cell))
+			continue;
+		
+		if (Cell->CombustibleActor.IsValid())
+		{
+			Cell->CombustibleInterface->AddCombustion(Cell->CombustionState.load());
+		}
+		else
+		{
+			Cell->CombustibleActor.Reset();
+			Cell->CombustibleInterface = nullptr;
+			Cell->bHasCombustibleInterface = false;
+		}
+
+		Index++;
+	}
+
+	if (Index >= PendingBurningActorsUpdates.Num())
+	{
+		PendingBurningActorsUpdates.Empty();
+		LastBurningActorUpdateIndex = 0;
 	}
 }
 
@@ -206,7 +292,6 @@ bool AFireSource::GetCell(const FVector& LocationBase, const FCollisionObjectQue
 		OutCell.Location = TraceBase;
 		return false;
 	}
-	
 }
 
 void AFireSource::PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation, const FCollisionObjectQueryParams& COQP)
@@ -219,91 +304,12 @@ void AFireSource::PrepareImmediateInitialCells(const FIntVector2& InitialCellKey
 	}
 }
 
-void AFireSource::BulkCacheFireCellsAsync(int StartX, int StartY, int RangeX, int RangeY)
-{
-	FVector OriginLocation = GetActorLocation();
-	bAsyncBulkCachingRunning.store(true);
-	Async(EAsyncExecution::ThreadPool, [this, &]()
-	{
-		FScopeLock Lock(&BulkCacheLock);
-		
-		TArray<FFireCellKVP> PreCachedCells;
-		PreCachedCells.Reserve(RangeX * RangeY);
-
-		FFireCell EmptyCell;
-		for (int i = StartX; i <= StartX + RangeX; i++)
-		{
-			PreCachedCells.Emplace(FIntVector2(i, 0), EmptyCell);
-			PreCachedCells.Emplace(FIntVector2(-i, 0), EmptyCell);
-
-			for (int j = 1; j <= StartY + RangeY; j++)
-			{
-				PreCachedCells.Emplace(FIntVector2(i, j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(i, -j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(-i, j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(-i, -j), EmptyCell);
-			}
-		}
-
-		for (int j = LastCellY; j < LastCellY + PreCacheCellCount; j++)
-		{
-			PreCachedCells.Emplace(FIntVector2(0, j), EmptyCell);
-			PreCachedCells.Emplace(FIntVector2(0, -j), EmptyCell);
-
-			for (int i = 1; i < LastCellX; i++)
-			{
-				PreCachedCells.Emplace(FIntVector2(i, j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(i, -j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(-i, j), EmptyCell);
-				PreCachedCells.Emplace(FIntVector2(-i, -j), EmptyCell);
-			}
-		}
-
-		TArrayView<FFireCellKVP> PreCachedCellsView = PreCachedCells;
-		FCollisionObjectQueryParams COQP;
-		COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
-
-		// idk, maybe instead just use the same approach as FireSpreadAsync where there's only num of cpu threads and aggregation in arrays
-		ParallelForWithExistingTaskContext(PreCachedCellsView, PreCachedCellsView.Num(), 1,
-	       [&](FFireCellKVP& CellKVP, int Index)
-	       {
-       			FFireCell& FireCell = CellKVP.Value;
-	       		// TODO instead of OriginLocation use previous FireCell location
-				GetCell(OriginLocation, COQP, CellKVP.Key, FireCell);
-	       });
-		
-		AsyncTask(ENamedThreads::GameThread, [this, PreCachedCells = MoveTemp(PreCachedCells), RangeX, RangeY] () mutable
-		{
-			for (auto& KVP : PreCachedCells)
-				Cells.Emplace(KVP.Key, MoveTemp(KVP.Value));
-
-			LastCellX += RangeX;
-			LastCellY += RangeY;
-			bAsyncBulkCachingRunning.store(false);
-		});
-	});
-}
-
 void AFireSource::UpdateOverallVolumes()
 {
-	float xExtent = FireCellSize * LastCellX;
-	float yExtent = FireCellSize * LastCellY;
-	float LowestZ = FLT_MAX;
-	float HighestZ = -FLT_MAX;
-
-	for (const auto& Cell : Cells)
-	{
-		if (Cell.Value.Location.Z < LowestZ)
-			LowestZ = Cell.Value.Location.Z;
-
-		if (Cell.Value.Location.Z > HighestZ)
-			HighestZ = Cell.Value.Location.Z;
-	}
 	
-	BoxComponent->SetBoxExtent(FVector(xExtent, yExtent, FMath::Abs(HighestZ - LowestZ) / 2));
 }
 
-bool AFireSource::StartFireAtCell(FIntVector2 InitialCellKey, FVector OriginLocation)
+bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation)
 {
 	FCollisionObjectQueryParams COQP;
 	COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
@@ -327,7 +333,6 @@ bool AFireSource::StartFireAtCell(FIntVector2 InitialCellKey, FVector OriginLoca
 	
 	PrepareImmediateInitialCells(InitialCellKey, OriginLocation, COQP);
 	
-	BulkCacheFireCellsAsync(2, 2, PreCacheCellCount, PreCacheCellCount);
 	UpdateOverallVolumes();
 	return true;
 }
@@ -358,9 +363,9 @@ void AFireSource::PauseFire()
 		SetActorTickEnabled(false);
 }
 
-void AFireSource::SpreadFireAsync(bool bLog)
+void AFireSource::SpreadFireAsync()
 {
-	bAsyncUpdateRunning = true;
+	bAsyncUpdateRunning.store(true);
 	// what happens asynchronously:
 	// 1. spreading fire by edge cells
 	// 2. updating edge cells:
@@ -370,73 +375,49 @@ void AFireSource::SpreadFireAsync(bool bLog)
 	// 3. keeping track of pre-cached cells and invoking bulk precache when there's less than some amount of cached cells left
 	// 4. updating contiguous box collisions for damage and nav mesh
 	
-	Async(EAsyncExecution::ThreadPool, [this, bLog]()
+	Async(EAsyncExecution::ThreadPool, [this]()
 	{
 		int ThreadsCount = FPlatformMisc::NumberOfCoresIncludingHyperthreads();
 		
 		TArray<TFuture<FAsyncFireSpreadResult>> ThreadResults;
-		const int BatchSize = EdgeCells.Num() / ThreadsCount;
 		TArray<FIntVector2> EdgeCellsArray = EdgeCells.Array();
-		for (int i = 0; i < ThreadsCount; i++)
+		int EdgeCellsCount = EdgeCells.Num();
+		int BaseBatchSize = EdgeCellsCount < ThreadsCount ? EdgeCellsCount : EdgeCellsCount / ThreadsCount;
+		int BatchStartIndex = 0;
+		int CurrentBatchSize = BaseBatchSize;
+		while (BatchStartIndex < EdgeCellsCount)
 		{
-			int Start = BatchSize * i;
-			TFuture<FAsyncFireSpreadResult> Future = Async(EAsyncExecution::Thread, [this, &EdgeCellsArray, Start, BatchSize, bLog]()
+			CurrentBatchSize = FMath::Min(EdgeCellsCount - BatchStartIndex, BaseBatchSize);
+			TFuture<FAsyncFireSpreadResult> Future = Async(EAsyncExecution::Thread, [this, &EdgeCellsArray, BatchStartIndex, CurrentBatchSize]()
 			{
-				FIRESIM_LOG_ASYNC(TEXT("Spread fire in thread"), Verbose);
-
-				int End = FMath::Min(Start + BatchSize, EdgeCellsArray.Num());
+				// FIRESIM_LOG_ASYNC_RAW(TEXT("Spread fire in thread"), Verbose);
 				FAsyncFireSpreadResult BatchResult;
-				SpreadFireBatch(EdgeCellsArray, Start, End, BatchResult);
+				SpreadFireBatch(EdgeCellsArray, BatchStartIndex, BatchStartIndex + CurrentBatchSize, BatchResult);
 				return BatchResult;
 			});
-			
+
+			BatchStartIndex += CurrentBatchSize;
 			ThreadResults.Add(MoveTemp(Future));
 		}
-
+		
 		FAsyncFireSpreadResult AggregatedResult;
 		for (int i = 0; i < ThreadResults.Num(); i++)
 		{
 			auto ThreadFireSpreadResult = MoveTemp(ThreadResults[i].GetMutable());
-			AggregatedResult += ThreadFireSpreadResult;
+			AggregatedResult.Aggregate(ThreadFireSpreadResult);
 		}
 
-		// 3. keeping track of pre-cached cells and invoking bulk precache when there's less than some amount of cached cells left
-		bool bNeedCacheInAdvanceX = false, bNeedCacheInAdvanceY = false;
-		for (const auto& NewEdgeCellIndex : AggregatedResult.IgnitedCells)
-		{
-			if (NewEdgeCellIndex.X > LastCellX - PreCacheCellCount)
-				bNeedCacheInAdvanceX = true;
-
-			if (NewEdgeCellIndex.Y > LastCellY - PreCacheCellCount)
-				bNeedCacheInAdvanceY = true;
-
-			if (bNeedCacheInAdvanceX && bNeedCacheInAdvanceY)
-				break;
-		}
-
-		if (bNeedCacheInAdvanceX || bNeedCacheInAdvanceY)
-		{
-			AsyncTask(ENamedThreads::GameThread, [this, bNeedCacheInAdvanceX, bNeedCacheInAdvanceY]()
-			{
-				const int RangeX = bNeedCacheInAdvanceX ? PreCacheCellCount : 0;
-				const int RangeY = bNeedCacheInAdvanceY ? PreCacheCellCount : 0;
-				BulkCacheFireCellsAsync(LastCellX, LastCellY, RangeX, RangeY);
-			});
-		}
+		// Make new cells for ignited cells
+		CreateNewFireCells(AggregatedResult);
 		
 		// 4. updating contiguous box collisions for damage and nav mesh
+		// TODO
 		
-		// after async update is completed, on game thread
-		// 5. Remove pending edge cells that are no more edge cells
-		// 6. Update FVector array of fire locations for niagara (and replicate)
-		// 7. Add ignited cells to edge cells if there are combustible cells around it
-		// 8. Update all ICombustible actors (or add them to a time-sliced queue on game thread)
-		AsyncTask(ENamedThreads::Type::GameThread, [this, AggregatedResult = MoveTemp(AggregatedResult)]
+		AsyncTask(ENamedThreads::Type::GameThread, [this, AggregatedResult = MoveTemp(AggregatedResult)] () mutable
 		{
 			ProcessFireSpreadResult(AggregatedResult);
+			bAsyncUpdateRunning.store( false);
 		});
-
-		bAsyncUpdateRunning = false;
 	});
 }
 
@@ -458,12 +439,23 @@ void AFireSource::MarkEdgeCellForRemoval(const FIntVector2& EdgeCellIndex, FAsyn
 		Result.NotEdgeCellAnymore.Emplace(EdgeCellIndex);
 }
 
-void AFireSource::ProcessFireSpreadResult(const FAsyncFireSpreadResult& AggregatedResult)
+void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResult)
 {
+	// after async update is completed, on game thread
+	// 5. Remove pending edge cells that are no more edge cells
+	// 6. Update FVector array of fire locations for niagara (and replicate)
+	// 7. Add ignited cells to edge cells if there are combustible cells around it
+	// 8. Append new cells
+	// 9. Update all ICombustible actors (or add them to a time-sliced queue on game thread)
+	
 	// 5. Remove pending edge cells that are no more edge cells
 	for (const auto& NotEdgeCellAnymore : AggregatedResult.NotEdgeCellAnymore)
 		EdgeCells.Remove(NotEdgeCellAnymore);
 
+	// Append new cells
+	if (AggregatedResult.NewCells.IsEmpty())
+		Cells.Append(MoveTemp(AggregatedResult.NewCells));
+	
 	// 6. Update FVector array of fire locations for niagara (and replicate)
 	if (AggregatedResult.IgnitedCells.Num() > 0)
 	{
@@ -472,10 +464,11 @@ void AFireSource::ProcessFireSpreadResult(const FAsyncFireSpreadResult& Aggregat
 			const auto* IgnitedCell = Cells.Find(IgnitedCellIndex);
 			FireLocations.Emplace(IgnitedCell->Location);
 			bool bIgnitedCellIsEdgeCell = false;
+			
 			for (const auto& Direction : RadialDirections)
 			{
 				FIntVector2 NeighborCellIndex = IgnitedCellIndex + Direction;
-				if (ensure(Cells.Contains(NeighborCellIndex)) && !Cells[NeighborCellIndex].IsObstacle() && Cells[NeighborCellIndex].IsIgnited())
+				if (ensure(Cells.Contains(NeighborCellIndex)) && !Cells[NeighborCellIndex].IsObstacle() && !Cells[NeighborCellIndex].IsIgnited())
 				{
 					bIgnitedCellIsEdgeCell = true;
 					break;
@@ -490,16 +483,9 @@ void AFireSource::ProcessFireSpreadResult(const FAsyncFireSpreadResult& Aggregat
 		MARK_PROPERTY_DIRTY_FROM_NAME(AFireSource, FireLocations, this);
 		UpdateFireLocations();
 	}
-
-	// 8. Update all ICombustible actors (or add them to a time-sliced queue on game thread)
-	ensure(false); // not ready yet
-			
-	for (const auto& UpdatedCombustibleActorKey : AggregatedResult.CombustionActorUpdates)
-	{
-		const auto* Cell = Cells.Find(UpdatedCombustibleActorKey);
-		if (Cell && Cell->CombustibleActor.IsValid())
-			Cell->CombustibleInterface->AddCombustion(Cell->CombustionState.load());
-	}
+	
+	// 8. add actor updates to a time-sliced queue on game thread)
+	PendingBurningActorsUpdates.Append(AggregatedResult.CombustionActorUpdates.Array());
 }
 
 bool AFireSource::IsCombustible(const FFireCell& TargetCell, const FFireCell& ByCell) const
@@ -510,11 +496,11 @@ bool AFireSource::IsCombustible(const FFireCell& TargetCell, const FFireCell& By
 	return TargetCell.Location.Z < ByCell.Location.Z + ByCell.FireHeight && TargetCell.Location.Z > ByCell.Location.Z - FireDownwardPropagationThreshold;
 }
 
-void AFireSource::SpreadFireBatch(const TArray<FIntVector2>& EdgeCells, int Start, int End, FAsyncFireSpreadResult& BatchResult)
+void AFireSource::SpreadFireBatch(const TArray<FIntVector2>& EdgeCellsBatch, int Start, int End, FAsyncFireSpreadResult& BatchResult)
 {
 	for (int i = Start; i < End; i++)
 	{
-		const auto& EdgeCellIndex = EdgeCells[i];
+		const auto& EdgeCellIndex = EdgeCellsBatch[i];
 		const TArray<FIntVector2>* Directions = WindStrength < WindEffectActivationThreshold
 			? &RadialDirections
 			: &WindDirectionToNeighbors[WindDirectionQuantized];
@@ -522,6 +508,15 @@ void AFireSource::SpreadFireBatch(const TArray<FIntVector2>& EdgeCells, int Star
 		for (const auto& Direction : *Directions)
 		{
 			FIntVector2 TestCellIndex = EdgeCellIndex + Direction;
+			if (!ensure(Cells.Contains(TestCellIndex)))
+			{
+// #if WITH_EDITOR
+				// FString LogString = FString::Printf(TEXT("Cell [%d, %d] doesnt exist for edge cell [%d, %d]"), TestCellIndex.X, TestCellIndex.Y, EdgeCellIndex.X, EdgeCellIndex.Y);
+				// FIRESIM_LOG_ASYNC(LogString, Warning);
+// #endif
+				continue;
+			}
+			
 			if (IsCombustible(Cells[TestCellIndex], Cells[EdgeCellIndex]))
 			{
 				const float WindEffect = WindStrength * (Cells[TestCellIndex].Location - Cells[EdgeCellIndex].Location).GetSafeNormal() | WindDirection;

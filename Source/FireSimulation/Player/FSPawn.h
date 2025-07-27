@@ -16,8 +16,6 @@ class FIRESIMULATION_API AFSPawn : public ASpectatorPawn
 public:
 	AFSPawn();
 
-	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
-
 protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
 	UInputAction* SetOnFireInputAction;
@@ -25,6 +23,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly)
 	float TraceDistance = 20000;
 
-private:
+	UFUNCTION(BlueprintCallable)
 	void SetOnFireInput();
 };

@@ -9,16 +9,6 @@ AFSPawn::AFSPawn()
 	PrimaryActorTick.bCanEverTick = true;
 }
 
-// Called to bind functionality to input
-void AFSPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
-{
-	Super::SetupPlayerInputComponent(PlayerInputComponent);
-	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-	{
-		EnhancedInputComponent->BindAction(SetOnFireInputAction, ETriggerEvent::Triggered, this, &AFSPawn::SetOnFireInput);
-	}
-}
-
 void AFSPawn::SetOnFireInput()
 {
 	FVector ViewLocation;
@@ -32,11 +22,13 @@ void AFSPawn::SetOnFireInput()
 	bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, ViewLocation, TraceEnd, ECC_Visibility, Params);
 	if (bHit && Hit.GetActor())
 	{
-		auto Combustible = Cast<ICombustible>(Hit.GetActor());
-		if (!Combustible->IsIgnited())
+		if (auto Combustible = Cast<ICombustible>(Hit.GetActor()))
 		{
-			Combustible->StartFire();
-			bSetOnFire = true;
+			if (!Combustible->IsIgnited())
+			{
+				Combustible->StartFire();
+				bSetOnFire = true;
+			}
 		}
 	}
 

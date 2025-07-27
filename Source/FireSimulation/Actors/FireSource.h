@@ -17,16 +17,17 @@ typedef TKeyValuePair<FIntVector2, FFireCell> FFireCellKVP;
 
 struct FAsyncFireSpreadResult
 {
-	TSet<FIntVector2>  CombustionActorUpdates;
+	TSet<FIntVector2> CombustionActorUpdates;
 	TSet<FIntVector2> IgnitedCells;
 	TSet<FIntVector2> NotEdgeCellAnymore;
+	TMap<FIntVector2, FFireCell> NewCells;
 
-	FAsyncFireSpreadResult& operator += (const FAsyncFireSpreadResult& Other)
+	void Aggregate(FAsyncFireSpreadResult& Other)
 	{
 		CombustionActorUpdates.Append(MoveTemp(Other.CombustionActorUpdates));
 		IgnitedCells.Append(MoveTemp(Other.IgnitedCells));
 		NotEdgeCellAnymore.Append(MoveTemp(Other.NotEdgeCellAnymore));
-		return *this;
+		// NewCells.Append(MoveTemp(Other.NewCells)); // new cells are appended separately
 	}
 };
 
@@ -50,7 +51,7 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 
 	UBoxComponent* GetVolumeBox() const { return BoxComponent; }
-	
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -85,7 +86,7 @@ protected:
 	int PreCacheCellCount = 250;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
-	int MaxActorsUpdatesPerTick = 200;
+	int MaxActorsUpdatesPerTick = 100;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
 	float RelevantDistanceToOtherFireSources = 500.f;
@@ -119,24 +120,24 @@ private:
 
 	bool GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP, const FIntVector2& CellIndex, FFireCell& OutCell) const;
 	void PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation, const FCollisionObjectQueryParams& COQP);
-	void BulkCacheFireCellsAsync(int StartX, int StartY, int RangeX, int RangeY);
 	
-	void SpreadFireAsync(bool bLog);
+	void SpreadFireAsync();
 	void MarkEdgeCellForRemoval(const FIntVector2& EdgeCellKey, FAsyncFireSpreadResult& Result);
-	void ProcessFireSpreadResult(const FAsyncFireSpreadResult& AggregatedResult);
+	void ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResult);
 	bool IsCombustible(const FFireCell& TargetCell, const FFireCell& ByCell) const;
 	void SpreadFireBatch(const TArray<FIntVector2>& EdgeCells, int Start, int End, FAsyncFireSpreadResult& BatchResult);
+	void CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult);
 
 	void Combust(FFireCell& Cell, float DeltaTime, float WindEffect);
 	void UpdateOverallVolumes();
-	bool StartFireAtCell(FIntVector2 InitialCellKey, FVector OriginLocation);
+	bool StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation);
 
 	float WindEffectActivationThreshold = 2.f;
 	float HighestAltitude = FLT_MAX;
 	float LowestAltitude = -FLT_MAX;
-
-	std::atomic<float> AccumulatedDeltaTime = 0.f;
+	int LastBurningActorUpdateIndex = 0;
 	
+	std::atomic<float> AccumulatedDeltaTime = 0.f;
 	
 	std::atomic<bool> bAsyncUpdateRunning = false;
 	// not sure I really need it 
@@ -144,6 +145,8 @@ private:
 
 	std::atomic<bool> bPendingProcessFireSpreadResult;
 
+	std::atomic<bool> bLogDebugAtomic;
+	
 	FCriticalSection BulkCacheLock;
 	
 	TMap<FIntVector2, FFireCell> Cells;

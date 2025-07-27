@@ -52,6 +52,7 @@ void ACombustibleActor::AddCombustion(float NewCombustionState)
 	{
 		CombustionState = FMath::Clamp(CombustionState + NewCombustionState, 0.f, MaxCombustionLevel);
 		MARK_PROPERTY_DIRTY_FROM_NAME(ACombustibleActor, CombustionState, this);
+		UpdateCombustionState();
 	}
 }
 
