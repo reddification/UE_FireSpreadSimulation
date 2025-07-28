@@ -46,7 +46,7 @@ public:
 	void StartFire();
 
 	UFUNCTION(BlueprintCallable)
-	void PauseFire();
+	void SetFirePaused(bool bPaused);
 
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -70,14 +70,17 @@ protected:
 
 	// size of 1 dimension of a fire cell box, i.e. if its value is 30, then it's area is 30*30
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 10.f, ClampMin = 10.f))
-	float FireCellSize = 25.f;
+	double FireCellSize = 25.f;
 
+	// if a potential cell is lower than this value - fire won't spread there
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
 	double FireDownwardPropagationThreshold = 20.0;
 
+	// Vertical height of fire, affects how higher can a cell be to be ignited by this cell
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
 	double BaseFireStrength = 50.0;
 
+	// Currently only used to reserve memory for fire cell containers
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
 	int FireSpreadLimit = 2000;
 
@@ -85,12 +88,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
 	int PreCacheCellCount = 250;
 
+	// don't update more than this amount of actor that are burning per tick
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
 	int MaxActorsUpdatesPerTick = 100;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
-	float RelevantDistanceToOtherFireSources = 500.f;
-	
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bLog_Debug = true;
 
@@ -100,8 +101,8 @@ protected:
 private:
 	void OnWindChanged(const FVector& NewWindVector, float NewWindStrength);
 	
-	FVector WindDirection;
-	int WindDirectionQuantized;
+	FVector WindDirection = FVector::ZeroVector;
+	int WindDirectionQuantized = 0;
 	float WindStrength = 0.f;
 	
 	// TODO FFastArraySerializer
@@ -138,7 +139,6 @@ private:
 	void CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult);
 
 	void Combust(FFireCell& Cell, float DeltaTime, float WindEffect);
-	void UpdateOverallVolumes();
 	bool StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation);
 
 	float WindEffectActivationThreshold = 2.f;
@@ -149,9 +149,7 @@ private:
 	std::atomic<float> AccumulatedDeltaTime = 0.f;
 	
 	std::atomic<bool> bAsyncUpdateRunning = false;
-
-	std::atomic<bool> bPendingProcessFireSpreadResult;
-
+	
 	std::atomic<bool> bLogDebugAtomic;
 	
 	TMap<FIntVector2, FFireCell> Cells;

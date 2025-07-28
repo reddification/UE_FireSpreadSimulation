@@ -46,7 +46,7 @@ AFireSource::AFireSource()
 	BoxComponent = CreateDefaultSubobject<UBoxComponent>(TEXT("FireAreaVolume"));
 	BoxComponent->SetupAttachment(GetRootComponent());
 	
-	// key - dot product between wind and world forward vector mapped from 0 to 7. preudocode: round(acos((wind, world x)) / 2pi * 8)
+	// key - dot product between wind and world forward vector mapped from 0 to 7. pseudocode: round(acos((wind, world x)) / 2pi * 8)
 	// values - group of 3 directions to neighbor cells where this wind direction makes fire spread 
 	WindDirectionToNeighbors =
 	{
@@ -81,61 +81,6 @@ void AFireSource::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& Ou
 	FDoRepLifetimeParams DoRepLifetimeParamsForNewLocations { COND_None, REPNOTIFY_OnChanged, true };
 	DOREPLIFETIME_WITH_PARAMS_FAST(AFireSource, FireLocations, DoRepLifetimeParamsForAllFireLocations);
 	DOREPLIFETIME_WITH_PARAMS_FAST(AFireSource, NewFireLocations, DoRepLifetimeParamsForNewLocations);
-}
-
-void AFireSource::CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult)
-{
-	if (AggregatedResult.IgnitedCells.IsEmpty())
-		return;
-
-	int ThreadsCount = FPlatformMisc::NumberOfCoresIncludingHyperthreads();
-
-	const int IgnitedCellsNum = AggregatedResult.IgnitedCells.Num();
-	int BaseBatchSize = IgnitedCellsNum < ThreadsCount ? IgnitedCellsNum : IgnitedCellsNum / ThreadsCount;
-	int BatchStartIndex = 0;
-	int CurrentBatchSize = BaseBatchSize;
-	TArray<TFuture<TMap<FIntVector2, FFireCell>>> AllNewCellsFutures;
-	const auto IgnitedCellsArray = AggregatedResult.IgnitedCells.Array();
-
-	while (BatchStartIndex < IgnitedCellsNum)
-	{
-		CurrentBatchSize = FMath::Min(IgnitedCellsNum - BatchStartIndex, BaseBatchSize);
-		TFuture<TMap<FIntVector2, FFireCell>> Future = Async(EAsyncExecution::ThreadPool, [this, &IgnitedCellsArray, BatchStartIndex, CurrentBatchSize]()
-		{
-			FCollisionObjectQueryParams COQP;
-			COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
-			
-			TMap<FIntVector2, FFireCell> BatchResult;
-			BatchResult.Reserve(CurrentBatchSize * 4); // in general, a cell will have 3 pending neighbors, but edge cells can have 5 
-			int End = BatchStartIndex + CurrentBatchSize;
-			for (int i = BatchStartIndex; i < End; i++)
-			{
-				auto IgnitedCellIndex = IgnitedCellsArray[i];
-				for (const auto& RadialDirection : RadialDirections)
-				{
-					auto TestCellIndex = IgnitedCellIndex + RadialDirection;
-					if (!Cells.Contains(TestCellIndex))
-					{
-						FFireCell NewCell;
-						FVector NeighborLocation = Cells[IgnitedCellIndex].Location + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
-						GetCell(NeighborLocation, COQP, NewCell);
-						BatchResult.Emplace(TestCellIndex, NewCell);
-					}
-				}
-			}
-					
-			return BatchResult;
-		});
-
-		BatchStartIndex += CurrentBatchSize;
-		AllNewCellsFutures.Add(MoveTemp(Future));
-	}
-		
-	for (int i = 0; i < AllNewCellsFutures.Num(); i++)
-	{
-		auto ThreadFireSpreadResult = MoveTemp(AllNewCellsFutures[i].GetMutable());
-		AggregatedResult.NewCells.Append(MoveTemp(ThreadFireSpreadResult));
-	}
 }
 
 // Called when the game starts or when spawned
@@ -187,7 +132,7 @@ void AFireSource::Tick(float DeltaTime)
 
 	UpdateBurningActors();
 	
-	if (!bAsyncUpdateRunning && !EdgeCells.IsEmpty())
+	if (!bAsyncUpdateRunning.load() && !EdgeCells.IsEmpty())
 	{
 		AccumulatedDeltaTime.store(DeltaTime);
 		SpreadFireAsync();
@@ -212,8 +157,6 @@ void AFireSource::UpdateBurningActors()
 	if (PendingBurningActorsUpdates.IsEmpty())
 		return;
 	
-	// TODO what if PendingBurningActorUpdates gets new data for the same actor?
-	// perhaps replace PendingBurningActorsUpdates to TMap<AActor*, float> instead
 	int Index = LastBurningActorUpdateIndex;
 	int Until = FMath::Min(LastBurningActorUpdateIndex + MaxActorsUpdatesPerTick, PendingBurningActorsUpdates.Num());
 	
@@ -308,13 +251,8 @@ void AFireSource::PrepareImmediateInitialCells(const FIntVector2& InitialCellKey
 		FFireCell FireCell;
 		FVector NewLocation = BaseLocation + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
 		GetCell(NewLocation, COQP, FireCell);
-		Cells.Emplace(InitialCellKey + RadialDirection, MoveTemp(FireCell));
+		Cells.Emplace(InitialCellKey + RadialDirection, FireCell);
 	}
-}
-
-void AFireSource::UpdateOverallVolumes()
-{
-	
 }
 
 bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation)
@@ -331,7 +269,7 @@ bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVect
 		return false;
 	}
 
-	Cells.Emplace(InitialCellKey, MoveTemp(InitialCell));
+	Cells.Emplace(InitialCellKey, InitialCell);
 	Cells[InitialCellKey].CombustionState.store(1.f);
 	EdgeCells.Emplace(InitialCellKey);
 
@@ -343,16 +281,18 @@ bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVect
 	
 	PrepareImmediateInitialCells(InitialCellKey, OriginLocation, COQP);
 	
-	UpdateOverallVolumes();
 	return true;
 }
 
 void AFireSource::StartFire()
 {
 	auto WindComponent = GetWorld()->GetGameState()->FindComponentByClass<UWindComponent>();
-	WindDirection = WindComponent->GetWindDirection();
-	WindStrength = WindComponent->GetWindStrength();
-	WindComponent->WindChangedEvent.AddUObject(this, &AFireSource::OnWindChanged);
+	if (ensure(WindComponent))
+	{
+		OnWindChanged(WindComponent->GetWindDirection(), WindComponent->GetWindStrength());
+		WindComponent->WindChangedEvent.AddUObject(this, &AFireSource::OnWindChanged);
+	}
+	
 	NiagaraComponent->ActivateSystem();
 	SetActorTickEnabled(true);
 	
@@ -367,10 +307,9 @@ void AFireSource::StartFire()
 	StartFireAtCell(InitialCellKey, OriginLocation);
 }
 
-void AFireSource::PauseFire()
+void AFireSource::SetFirePaused(bool bPaused)
 {
-	if (HasAuthority())
-		SetActorTickEnabled(false);
+	SetActorTickEnabled(!bPaused);
 }
 
 void AFireSource::SpreadFireAsync()
@@ -382,8 +321,7 @@ void AFireSource::SpreadFireAsync()
 	//	   2.1 mark for add newly ignited cells to edge cells
 	//	   2.2 mark actors that have combustible interface 
 	//	   2.3 mark for removal those who have no more pending neighbor cells
-	// 3. keeping track of pre-cached cells and invoking bulk precache when there's less than some amount of cached cells left
-	// 4. updating contiguous box collisions for damage and nav mesh
+	// 3. updating contiguous box collisions for damage and nav mesh
 	UE_VLOG(this, LogFireSimulation, Log, TEXT("SpreadFireAsync::Start"));
 	Async(EAsyncExecution::ThreadPool, [this]()
 	{
@@ -420,7 +358,7 @@ void AFireSource::SpreadFireAsync()
 		// Make new cells for ignited cells
 		CreateNewFireCells(AggregatedResult);
 		
-		// 4. updating contiguous box collisions for damage and nav mesh
+		// 3. updating contiguous box collisions for damage and nav mesh
 		// TODO
 		
 		AsyncTask(ENamedThreads::Type::GameThread, [this, AggregatedResult = MoveTemp(AggregatedResult)] () mutable
@@ -446,12 +384,11 @@ void AFireSource::SpreadFireAsync()
 				for (const auto& NotEdgeCellAnymore : AggregatedResult.NotEdgeCellAnymore)
 				{
 					auto Index = FIntVector2(NotEdgeCellAnymore.X, NotEdgeCellAnymore.Y);
-					UE_VLOG_LOCATION(this, LogFireSimulation, VeryVerbose, Cells[Index].Location, 25, FColor::Black, TEXT("Not edge cell anymore"));
+					UE_VLOG_LOCATION(this, LogFireSimulation_EdgeCells, Verbose, Cells[Index].Location, 25, FColor::Black, TEXT("Not edge cell anymore"));
 				}
 
 				for (const auto& NewCell : AggregatedResult.NewCells)
 				{
-					auto Index = FIntVector2(NewCell.Key.X, NewCell.Key.Y);
 					UE_VLOG_LOCATION(this, LogFireSimulation, VeryVerbose, NewCell.Value.Location, 25, FColor::White, TEXT("New cell"));
 				}
 			}
@@ -460,6 +397,61 @@ void AFireSource::SpreadFireAsync()
 			bAsyncUpdateRunning.store( false);
 		});
 	});
+}
+
+void AFireSource::CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult)
+{
+	if (AggregatedResult.IgnitedCells.IsEmpty())
+		return;
+
+	const int ThreadsCount = FPlatformMisc::NumberOfCoresIncludingHyperthreads();
+
+	const int IgnitedCellsNum = AggregatedResult.IgnitedCells.Num();
+	int BaseBatchSize = IgnitedCellsNum < ThreadsCount ? IgnitedCellsNum : IgnitedCellsNum / ThreadsCount;
+	int BatchStartIndex = 0;
+	int CurrentBatchSize = BaseBatchSize;
+	TArray<TFuture<TMap<FIntVector2, FFireCell>>> AllNewCellsFutures;
+	const auto IgnitedCellsArray = AggregatedResult.IgnitedCells.Array();
+
+	while (BatchStartIndex < IgnitedCellsNum)
+	{
+		CurrentBatchSize = FMath::Min(IgnitedCellsNum - BatchStartIndex, BaseBatchSize);
+		TFuture<TMap<FIntVector2, FFireCell>> Future = Async(EAsyncExecution::ThreadPool, [this, &IgnitedCellsArray, BatchStartIndex, CurrentBatchSize]()
+		{
+			FCollisionObjectQueryParams COQP;
+			COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
+			
+			TMap<FIntVector2, FFireCell> BatchResult;
+			BatchResult.Reserve(CurrentBatchSize * 4); // in general, a cell has 3 pending neighbors, but corner cells can have 5 
+			int End = BatchStartIndex + CurrentBatchSize;
+			for (int i = BatchStartIndex; i < End; i++)
+			{
+				auto IgnitedCellIndex = IgnitedCellsArray[i];
+				for (const auto& RadialDirection : RadialDirections)
+				{
+					auto TestCellIndex = IgnitedCellIndex + RadialDirection;
+					if (!Cells.Contains(TestCellIndex))
+					{
+						FFireCell NewCell;
+						FVector NeighborLocation = Cells[IgnitedCellIndex].Location + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
+						GetCell(NeighborLocation, COQP, NewCell);
+						BatchResult.Emplace(TestCellIndex, NewCell);
+					}
+				}
+			}
+					
+			return BatchResult;
+		});
+
+		BatchStartIndex += CurrentBatchSize;
+		AllNewCellsFutures.Add(MoveTemp(Future));
+	}
+		
+	for (int i = 0; i < AllNewCellsFutures.Num(); i++)
+	{
+		auto ThreadFireSpreadResult = MoveTemp(AllNewCellsFutures[i].GetMutable());
+		AggregatedResult.NewCells.Append(MoveTemp(ThreadFireSpreadResult));
+	}
 }
 
 void AFireSource::MarkEdgeCellForRemoval(const FIntVector2& EdgeCellIndex, FAsyncFireSpreadResult& Result)
@@ -493,6 +485,17 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 	for (const auto& NotEdgeCellAnymore : AggregatedResult.NotEdgeCellAnymore)
 		EdgeCells.Remove(NotEdgeCellAnymore);
 
+#if WITH_EDITOR
+	if (bLog_Debug)
+	{
+		for (const auto& NewCell : AggregatedResult.NewCells)
+		{
+			bool bGood = !Cells.Contains(NewCell.Key);
+			ensure(bGood);
+		}
+	}
+#endif
+	
 	// Append new cells
 	if (!AggregatedResult.NewCells.IsEmpty())
 		Cells.Append(MoveTemp(AggregatedResult.NewCells));
@@ -502,9 +505,9 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 	{
 		for (const auto& IgnitedCellIndex : AggregatedResult.IgnitedCells)
 		{
-			const auto* IgnitedCell = Cells.Find(IgnitedCellIndex);
-			FireLocations.Emplace(IgnitedCell->Location);
-			NewFireLocations.Emplace(IgnitedCell->Location);
+			const auto& IgnitedCell = Cells[IgnitedCellIndex];
+			FireLocations.Emplace(IgnitedCell.Location);
+			NewFireLocations.Emplace(IgnitedCell.Location);
 			bool bIgnitedCellIsEdgeCell = false;
 			
 			for (const auto& Direction : RadialDirections)
@@ -529,6 +532,18 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 	
 	// 8. add actor updates to a time-sliced queue on game thread)
 	PendingBurningActorsUpdates.Append(AggregatedResult.CombustionActorUpdates.Array());
+
+#if WITH_EDITOR
+	if (bLog_Debug)
+	{
+		UE_VLOG(this, LogFireSimulation_EdgeCells, Log, TEXT("Edge cells count: %d"), EdgeCells.Num());
+		for (const auto& EdgeCell : EdgeCells)
+		{
+			auto Index = FIntVector2(EdgeCell.X, EdgeCell.Y);
+			UE_VLOG_LOCATION(this, LogFireSimulation_EdgeCells, VeryVerbose, Cells[Index].Location, 25, FColor::Blue, TEXT("Edge cell [%d, %d]"), EdgeCell.X, EdgeCell.Y);
+		}
+	}
+#endif
 }	
 
 bool AFireSource::IsCombustible(const FFireCell& TargetCell, const FFireCell& ByCell) const
@@ -590,7 +605,11 @@ void AFireSource::OnWindChanged(const FVector& NewWindVector, float NewWindStren
 {
 	WindDirection = NewWindVector;
 	WindStrength = NewWindStrength;
-	WindDirectionQuantized = FMath::RoundToInt32(FMath::Acos(WindDirection | FVector::ForwardVector) / UE_TWO_PI * 8);
+	float acos = FMath::Acos(WindDirection | FVector::ForwardVector);
+	if ((WindDirection | FVector::RightVector) < 0.f)
+		acos = UE_TWO_PI - acos;
+	
+	WindDirectionQuantized = FMath::RoundToInt32(acos / UE_TWO_PI * 8.f);
 }
 
 void AFireSource::OnRep_FireLocations()
@@ -632,5 +651,10 @@ void AFireSource::OnSomethingLeftFireVolume(UPrimitiveComponent* OverlappedCompo
 void AFireSource::Combust(FFireCell& Cell, float DeltaTime, float WindEffect)
 {
 	ensure(DeltaTime * WindEffect * Cell.CombustionRate >= 0.f);
-	Cell.CombustionState.fetch_add(DeltaTime * WindEffect * Cell.CombustionRate, std::memory_order_relaxed);
+	float Debug_Previous = Cell.CombustionState.load();
+	auto FetchAddResult = Cell.CombustionState.fetch_add(DeltaTime * WindEffect * Cell.CombustionRate);
+	ensure(FMath::IsNearlyEqual(Debug_Previous, FetchAddResult));
+	float NewValue = Cell.CombustionState.load();
+	
+	ensure(Debug_Previous < NewValue);
 }

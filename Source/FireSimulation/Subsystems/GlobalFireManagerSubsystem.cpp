@@ -28,6 +28,14 @@ void UGlobalFireManagerSubsystem::StartFire(const FVector& Origin)
 		GlobalFireSource->StartFireAtLocation(Origin);
 }
 
+void UGlobalFireManagerSubsystem::SetFireSimulationPaused(bool bPaused)
+{
+	if (GlobalFireSource.IsValid())
+	{
+		GlobalFireSource->SetFirePaused(bPaused);
+	}
+}
+
 TArray<AFireSource*> UGlobalFireManagerSubsystem::GetRelevantFireSources(AFireSource* FireSource, float RelevancyDistance) const
 {
 	TArray<AFireSource*> RelevantFireSources;

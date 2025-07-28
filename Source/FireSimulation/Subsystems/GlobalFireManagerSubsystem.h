@@ -20,6 +20,9 @@ public:
 	void UnregisterFireSource(AFireSource* FireSource);
 	void StartFire(const FVector& Origin);
 
+	UFUNCTION(BlueprintCallable)
+	void SetFireSimulationPaused(bool bPaused);
+	
 private:
 	TArray<AFireSource*> GetRelevantFireSources(AFireSource* FireSource, const float RelevancyDistance) const;
 	TSet<TWeakObjectPtr<AFireSource>> FireSources;

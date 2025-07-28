@@ -23,6 +23,9 @@ public:
 	FORCEINLINE float GetWindStrength() const { return WindStrength; } 
 
 	UFUNCTION(BlueprintCallable)
+	const FRotator& GetWindRotator() const { return WindDirection; };
+	
+	UFUNCTION(BlueprintCallable)
 	void SetWindDirection(const FRotator& NewDirection);
 
 	UFUNCTION(BlueprintCallable)

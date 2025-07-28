@@ -9,14 +9,17 @@ struct FPhysicMaterialCombustionParameters
 {
 	GENERATED_BODY()
 	
+	// affects how fast cell ignites
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
-	float IgnitionRate = 0.4f; // affects how fast cell ignites
+	float IgnitionRate = 0.4f;
 
+	// affects how high fire goes (in unreal units)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, meta=(UIMin = 1.f, ClampMin = 1.f))
-	float BurningStrength = 100.f; // affects how high fire goes (in unreal units)
+	float BurningStrength = 100.f;
 
+	// affects how slow fire goes out
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, meta=(UIMin = 0.f, ClampMin = 0.f))
-	float BurnoutRate = 0.015f; // affects how slow fire goes out
+	float BurnoutRate = 0.015f;
 };
 
 struct FFireCell
