@@ -15,22 +15,6 @@ class UBoxComponent;
 
 typedef TKeyValuePair<FIntVector2, FFireCell> FFireCellKVP; 
 
-struct FAsyncFireSpreadResult
-{
-	TSet<FIntVector2> CombustionActorUpdates;
-	TSet<FIntVector2> IgnitedCells;
-	TSet<FIntVector2> NotEdgeCellAnymore;
-	TMap<FIntVector2, FFireCell> NewCells;
-
-	void Aggregate(FAsyncFireSpreadResult& Other)
-	{
-		CombustionActorUpdates.Append(MoveTemp(Other.CombustionActorUpdates));
-		IgnitedCells.Append(MoveTemp(Other.IgnitedCells));
-		NotEdgeCellAnymore.Append(MoveTemp(Other.NotEdgeCellAnymore));
-		NewCells.Append(MoveTemp(Other.NewCells)); // new cells are usually appended separately
-	}
-};
-
 UCLASS()
 class FIRESIMULATION_API AFireSource : public AActor
 {
@@ -94,9 +78,13 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bLog_Debug = true;
+	
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bLog_Debug_VisLog_ShowCellIndex = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bDebug_DontUpdateVFX = false;
+
 
 private:
 	void OnWindChanged(const FVector& NewWindVector, float NewWindStrength);
@@ -133,12 +121,13 @@ private:
 	
 	void SpreadFireAsync();
 	void MarkEdgeCellForRemoval(const FIntVector2& EdgeCellKey, FAsyncFireSpreadResult& Result);
+	void DebugLog();
 	void ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResult);
 	bool IsCombustible(const FFireCell& TargetCell, const FFireCell& ByCell) const;
 	void SpreadFireBatch(const TArray<FIntVector2>& EdgeCells, int Start, int End, FAsyncFireSpreadResult& BatchResult);
 	void CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult);
 
-	void Combust(FFireCell& Cell, float DeltaTime, float WindEffect);
+	float Combust(FFireCell& Cell, float DeltaTime, float WindEffect);
 	bool StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation);
 
 	float WindEffectActivationThreshold = 2.f;
@@ -164,7 +153,7 @@ private:
 	TArray<UBoxComponent*> DiscreteVolumes;
 
 	// I assume since there can be thousands or actors to update their visuals, doing it in 1 tick isn't the best idea. so I time-slice it
-	TArray<FIntVector2> PendingBurningActorsUpdates;
+	TArray<TPair<FIntVector2, float>> PendingBurningActorsUpdates;
 	
 	void UpdateBurningActors();
 };

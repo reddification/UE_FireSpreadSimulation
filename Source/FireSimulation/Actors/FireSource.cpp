@@ -162,13 +162,15 @@ void AFireSource::UpdateBurningActors()
 	
 	while (Index < Until)
 	{
-		auto Cell = Cells.Find(PendingBurningActorsUpdates[Index]);
+		auto Cell = Cells.Find(PendingBurningActorsUpdates[Index].Key);
 		if (!ensure(Cell))
 			continue;
 		
 		if (Cell->CombustibleActor.IsValid())
 		{
-			Cell->CombustibleInterface->SetCombustion(Cell->CombustionState.load());
+			Cell->CombustibleInterface->AddCombustion(PendingBurningActorsUpdates[Index].Value);
+			if (Cell->CombustibleInterface->IsIgnited())
+				Cell->bCombustibleActorIgnited = true;
 		}
 		else
 		{
@@ -270,7 +272,7 @@ bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVect
 	}
 
 	Cells.Emplace(InitialCellKey, InitialCell);
-	Cells[InitialCellKey].CombustionState.store(1.f);
+	Cells[InitialCellKey].CombustionState = 1.f;
 	EdgeCells.Emplace(InitialCellKey);
 
 	FireLocations.Emplace(OriginLocation);
@@ -371,8 +373,8 @@ void AFireSource::SpreadFireAsync()
 			{
 				for (const auto& CombustionActor : AggregatedResult.CombustionActorUpdates)
 				{
-					auto Index = FIntVector2(CombustionActor.X, CombustionActor.Y);
-					UE_VLOG_LOCATION(this, LogFireSimulation, VeryVerbose, Cells[Index].Location, 25, FColor::Yellow, TEXT("Combustible actor update"));
+					auto Index = FIntVector2(CombustionActor.Key.X, CombustionActor.Key.Y);
+					UE_VLOG_LOCATION(this, LogFireSimulation_Actors, VeryVerbose, Cells[Index].Location, 25, FColor::Yellow, TEXT("Combustible actor update"));
 				}
 
 				for (const auto& IgnitedCell : AggregatedResult.IgnitedCells)
@@ -461,7 +463,7 @@ void AFireSource::MarkEdgeCellForRemoval(const FIntVector2& EdgeCellIndex, FAsyn
 	for (const auto& Direction : RadialDirections)
 	{
 		FIntVector2 TestCellIndex = EdgeCellIndex + Direction;
-		if (!Cells[TestCellIndex].IsObstacle() && !Cells[TestCellIndex].IsIgnited())
+		if (IsCombustible(Cells[TestCellIndex], Cells[EdgeCellIndex]))
 		{
 			bMustRemoveEdgeCell = false;
 			break;
@@ -476,9 +478,9 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 {
 	// after async update is completed, on game thread
 	// 5. Remove pending edge cells that are no more edge cells
-	// 6. Update FVector array of fire locations for niagara (and replicate)
-	// 7. Add ignited cells to edge cells if there are combustible cells around it
-	// 8. Append new cells
+	// 6. Append new cells
+	// 7. Update FVector array of fire locations for niagara (and replicate)
+	// 8. Add ignited cells to edge cells if there are combustible cells around it
 	// 9. Update all ICombustible actors (or add them to a time-sliced queue on game thread)
 	
 	// 5. Remove pending edge cells that are no more edge cells
@@ -496,11 +498,11 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 	}
 #endif
 	
-	// Append new cells
+	// 6. Append new cells
 	if (!AggregatedResult.NewCells.IsEmpty())
 		Cells.Append(MoveTemp(AggregatedResult.NewCells));
 	
-	// 6. Update FVector array of fire locations for niagara (and replicate)
+	// 7. Update FVector array of fire locations for niagara (and replicate)
 	if (AggregatedResult.IgnitedCells.Num() > 0)
 	{
 		for (const auto& IgnitedCellIndex : AggregatedResult.IgnitedCells)
@@ -513,14 +515,14 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 			for (const auto& Direction : RadialDirections)
 			{
 				FIntVector2 NeighborCellIndex = IgnitedCellIndex + Direction;
-				if (ensure(Cells.Contains(NeighborCellIndex)) && !Cells[NeighborCellIndex].IsObstacle() && !Cells[NeighborCellIndex].IsIgnited())
+				if (ensure(Cells.Contains(NeighborCellIndex)) && IsCombustible(Cells[NeighborCellIndex], IgnitedCell))
 				{
 					bIgnitedCellIsEdgeCell = true;
 					break;
 				}
 			}
 			
-			// 7. Add ignited cells to edge cells if there are combustible cells around it
+			// 8. Add ignited cells to edge cells if there are combustible cells around it
 			if (bIgnitedCellIsEdgeCell)
 				EdgeCells.Emplace(IgnitedCellIndex);
 		}
@@ -530,18 +532,13 @@ void AFireSource::ProcessFireSpreadResult(FAsyncFireSpreadResult& AggregatedResu
 		UpdateFireLocations();
 	}
 	
-	// 8. add actor updates to a time-sliced queue on game thread)
+	// 9. add actor updates to a time-sliced queue on game thread)
 	PendingBurningActorsUpdates.Append(AggregatedResult.CombustionActorUpdates.Array());
 
 #if WITH_EDITOR
 	if (bLog_Debug)
 	{
-		UE_VLOG(this, LogFireSimulation_EdgeCells, Log, TEXT("Edge cells count: %d"), EdgeCells.Num());
-		for (const auto& EdgeCell : EdgeCells)
-		{
-			auto Index = FIntVector2(EdgeCell.X, EdgeCell.Y);
-			UE_VLOG_LOCATION(this, LogFireSimulation_EdgeCells, VeryVerbose, Cells[Index].Location, 25, FColor::Blue, TEXT("Edge cell [%d, %d]"), EdgeCell.X, EdgeCell.Y);
-		}
+		DebugLog();
 	}
 #endif
 }	
@@ -585,15 +582,19 @@ void AFireSource::SpreadFireBatch(const TArray<FIntVector2>& EdgeCellsBatch, int
 				
 				// 1. spreading fire by edge cells
 				float DeltaTime = AccumulatedDeltaTime.load(); // i'm not sure if this is a good idea
-				Combust(Cells[TestCellIndex], DeltaTime, WindEffect);
+				float CombustIncrease = Combust(Cells[TestCellIndex], DeltaTime, WindEffect);
 
 				// 2.1 mark for add newly ignited cells to edge cells
 				if (Cells[TestCellIndex].IsIgnited())
 					BatchResult.IgnitedCells.Emplace(TestCellIndex);
 
-				// 2.2 mark actors that have combustible interface 
+				// 2.2 aggregate combustion increase for actors that have combustible interface.
+				// actor's individual combustion state != individual cell combustion state
 				if (Cells[TestCellIndex].bHasCombustibleInterface && !BatchResult.CombustionActorUpdates.Contains(TestCellIndex))
-					BatchResult.CombustionActorUpdates.Emplace(TestCellIndex);
+				{
+					float& AggregatedIncrease = BatchResult.CombustionActorUpdates.FindOrAdd(TestCellIndex);
+					AggregatedIncrease += CombustIncrease;
+				}
 			}
 		}
 
@@ -636,6 +637,61 @@ void AFireSource::UpdateFireLocations()
 	NewFireLocations.Empty();
 }
 
+void AFireSource::DebugLog()
+{
+	UE_VLOG(this, LogFireSimulation_EdgeCells, Log, TEXT("Edge cells count: %d"), EdgeCells.Num());
+	for (const auto& EdgeCell : EdgeCells)
+	{
+		auto Index = FIntVector2(EdgeCell.X, EdgeCell.Y);
+		if (bLog_Debug_VisLog_ShowCellIndex)
+		{
+			UE_VLOG_LOCATION(this, LogFireSimulation_EdgeCells, VeryVerbose, Cells[Index].Location, 25, FColor::Blue, TEXT("Edge cell [%d, %d]"), EdgeCell.X, EdgeCell.Y);
+		}
+		else
+		{
+			UE_VLOG_LOCATION(this, LogFireSimulation_EdgeCells, VeryVerbose, Cells[Index].Location, 25, FColor::Blue, TEXT(""));
+		}
+	}
+
+	for (const auto& Cell : Cells)
+	{
+		if (bLog_Debug_VisLog_ShowCellIndex)
+		{
+			UE_VLOG_LOCATION(this, LogFireSimulation_Combustions, VeryVerbose, Cell.Value.Location, 25, FColor::Purple,
+							 TEXT("Cell [%d, %d] = %.2f"), Cell.Key.X, Cell.Key.Y, Cell.Value.CombustionState.load());
+		}
+		else
+		{
+			UE_VLOG_LOCATION(this, LogFireSimulation_Combustions, VeryVerbose, Cell.Value.Location, 25, FColor::Purple,
+							 TEXT(""));
+		}
+			
+		if (Cell.Value.bHasCombustibleInterface)
+		{
+			if (bLog_Debug_VisLog_ShowCellIndex)
+			{
+				UE_VLOG_LOCATION(this, LogFireSimulation_Actors, VeryVerbose, Cell.Value.Location, 25, FColor::Cyan, TEXT("Actor cell [%d, %d]"), Cell.Key.X, Cell.Key.Y);
+			}
+			else
+			{
+				UE_VLOG_LOCATION(this, LogFireSimulation_Actors, VeryVerbose, Cell.Value.Location, 25, FColor::Cyan, TEXT(""));
+			}
+		}
+
+		if (Cell.Value.bObstacle)
+		{
+			if (bLog_Debug_VisLog_ShowCellIndex)
+			{
+				UE_VLOG_LOCATION(this, LogFireSimulation_Obstacles, VeryVerbose, Cell.Value.Location, 25, FColor::Red, TEXT("Obstacle [%d, %d]"), Cell.Key.X, Cell.Key.Y);
+			}
+			else
+			{
+				UE_VLOG_LOCATION(this, LogFireSimulation_Obstacles, VeryVerbose, Cell.Value.Location, 25, FColor::Red, TEXT(""));
+			}
+		}
+	}
+}
+
 void AFireSource::OnSomethingEnteredFireVolume(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
@@ -648,13 +704,16 @@ void AFireSource::OnSomethingLeftFireVolume(UPrimitiveComponent* OverlappedCompo
 	// TODO Some cells are now edge cells i.e. they can burn area where was something and now its gone
 }
 
-void AFireSource::Combust(FFireCell& Cell, float DeltaTime, float WindEffect)
+float AFireSource::Combust(FFireCell& Cell, float DeltaTime, float WindEffect)
 {
-	ensure(DeltaTime * WindEffect * Cell.CombustionRate >= 0.f);
-	float Debug_Previous = Cell.CombustionState.load();
-	auto FetchAddResult = Cell.CombustionState.fetch_add(DeltaTime * WindEffect * Cell.CombustionRate);
-	ensure(FMath::IsNearlyEqual(Debug_Previous, FetchAddResult));
-	float NewValue = Cell.CombustionState.load();
-	
-	ensure(Debug_Previous < NewValue);
+	// {
+		// FScopeLock Lock(&Cell.CombustionLock);
+		// ensure(DeltaTime * WindEffect * Cell.CombustionRate >= 0.f);
+		// Cell.CombustionState += DeltaTime * WindEffect * Cell.CombustionRate;
+	// }
+
+	const float Increase = DeltaTime * WindEffect * Cell.CombustionRate; 
+	ensure(Increase >= 0.f);
+	Cell.CombustionState.fetch_add(Increase);
+	return Increase; 	
 }

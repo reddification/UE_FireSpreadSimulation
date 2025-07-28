@@ -22,7 +22,7 @@ class FIRESIMULATION_API ICombustible
 
 	// Add interface functions to this class. This is the class that will be inherited to implement this interface.
 public:
-	virtual void SetCombustion(float NewConbustionState) = 0;
+	virtual void AddCombustion(float NewConbustionState) = 0;
 	virtual bool IsIgnited() const = 0;
 	virtual void StartFire() = 0;
 	virtual float GetCombustionRate() const = 0;

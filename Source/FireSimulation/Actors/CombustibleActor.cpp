@@ -46,12 +46,11 @@ void ACombustibleActor::BeginPlay()
 		UpdateCombustionState();
 }
 
-void ACombustibleActor::SetCombustion(float NewCombustionState)
+void ACombustibleActor::AddCombustion(float NewCombustionState)
 {
 	if (HasAuthority())
 	{
-		ensure(NewCombustionState > CombustionState);
-		CombustionState = FMath::Clamp(NewCombustionState, 0.f, MaxCombustionLevel);
+		CombustionState = FMath::Clamp(CombustionState + NewCombustionState, 0.f, MaxCombustionLevel);
 		MARK_PROPERTY_DIRTY_FROM_NAME(ACombustibleActor, CombustionState, this);
 		UpdateCombustionState();
 	}
@@ -67,7 +66,7 @@ void ACombustibleActor::StartFire()
 	if (!HasAuthority())
 		return;
 
-	SetCombustion(MaxCombustionLevel);
+	AddCombustion(MaxCombustionLevel);
 	if (auto GlobalFireSubsystem = GetWorld()->GetSubsystem<UGlobalFireManagerSubsystem>())
 		GlobalFireSubsystem->StartFire(GetActorLocation());
 }

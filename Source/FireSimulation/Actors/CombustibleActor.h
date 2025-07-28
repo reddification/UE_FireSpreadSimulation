@@ -35,7 +35,7 @@ protected:
 	float CombustionRate = 0.25;
 
 public: // ICombustionInterface
-	virtual void SetCombustion(float NewCombustionState) override;
+	virtual void AddCombustion(float NewCombustionState) override;
 	virtual bool IsIgnited() const override;
 	virtual void StartFire() override;
 	virtual float GetCombustionRate() const override;
