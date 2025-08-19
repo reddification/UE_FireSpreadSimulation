@@ -66,7 +66,7 @@ void ACombustibleActor::StartFire()
 	if (!HasAuthority())
 		return;
 
-	AddCombustion(MaxCombustionLevel);
+	// AddCombustion(MaxCombustionLevel);
 	if (auto GlobalFireSubsystem = GetWorld()->GetSubsystem<UGlobalFireManagerSubsystem>())
 		GlobalFireSubsystem->StartFire(GetActorLocation());
 }

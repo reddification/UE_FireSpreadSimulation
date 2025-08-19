@@ -112,8 +112,8 @@ private:
 	UFUNCTION()
 	void OnSomethingLeftFireVolume(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
-	bool GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP, FFireCell& OutCell) const;
-	void PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation, const FCollisionObjectQueryParams& COQP);
+	bool GetCell(const FVector& LocationBase, FFireCell& OutCell) const;
+	void PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation);
 	
 	void SpreadFireAsync();
 	void MarkEdgeCellForRemoval(const FIntVector2& EdgeCellKey, FAsyncFireSpreadResult& Result);

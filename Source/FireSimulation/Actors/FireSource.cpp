@@ -190,8 +190,7 @@ void AFireSource::UpdateBurningActors()
 	}
 }
 
-bool AFireSource::GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP,
-                          FFireCell& OutCell) const
+bool AFireSource::GetCell(const FVector& LocationBase, FFireCell& OutCell) const
 {
 	// ok. current issue with this function: it gets new cell for a requesting cell. but the same cell can be an obstacle for 1 cell and a valid cell for another cell
 	// for example, if 1 cell if lower than other, it might consider it an obstacle as unreacheable, or if the cell is higher that the other
@@ -209,13 +208,18 @@ bool AFireSource::GetCell(const FVector& LocationBase, const FCollisionObjectQue
 
 	if (IsInGameThread())
 	{
-		UE_VLOG_LOCATION(this, LogFireSimulation, Verbose, SweepStart, 25, FColor::Cyan, TEXT("Sweep start"));
-		UE_VLOG_LOCATION(this, LogFireSimulation, Verbose, SweepEnd, 25, FColor::Cyan, TEXT("Sweep end"));
+		UE_VLOG_LOCATION(this, LogFireSimulation, Verbose, SweepStart, 12.5f, FColor::Cyan, TEXT("Sweep start"));
+		UE_VLOG_LOCATION(this, LogFireSimulation, Verbose, SweepEnd, 12.5f, FColor::Cyan, TEXT("Sweep end"));
 	}
+
+	// AsyncTask(ENamedThreads::Type::GameThread, [&]()
+	// {
+	// 	DrawDebugLine(GetWorld(), SweepStart, SweepEnd, FColor::Red, false, 15.f, 0, 3.f); 
+	// });
 	
 	if (bHit)
 	{
-		OutCell.Location = Hit.ImpactPoint.Z < Hit.TraceStart.Z ? Hit.ImpactPoint : SweepEnd;
+		OutCell.Location =  Hit.ImpactPoint;// Hit.ImpactPoint.Z < Hit.TraceStart.Z ? Hit.ImpactPoint : SweepEnd;
 		if (Hit.PhysMaterial.IsValid())
 		{
 			if (IncombustibleSurfaces.Contains(Hit.PhysMaterial->SurfaceType))
@@ -250,24 +254,21 @@ bool AFireSource::GetCell(const FVector& LocationBase, const FCollisionObjectQue
 	}
 }
 
-void AFireSource::PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation, const FCollisionObjectQueryParams& COQP)
+void AFireSource::PrepareImmediateInitialCells(const FIntVector2& InitialCellKey, const FVector& BaseLocation)
 {
 	for (const FIntVector2& RadialDirection : RadialDirections)
 	{
 		FFireCell FireCell;
 		FVector NewLocation = BaseLocation + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
-		GetCell(NewLocation, COQP, FireCell);
+		GetCell(NewLocation, FireCell);
 		Cells.Emplace(InitialCellKey + RadialDirection, FireCell);
 	}
 }
 
 bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVector& OriginLocation)
 {
-	FCollisionObjectQueryParams COQP;
-	COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
-
 	FFireCell InitialCell;
-	bool bInitialCellCreated = GetCell(OriginLocation, COQP, InitialCell);
+	bool bInitialCellCreated = GetCell(OriginLocation, InitialCell);
 	if (!bInitialCellCreated)
 	{
 		UE_VLOG_UELOG(this, LogFireSimulation, Warning, TEXT("Can't start fire at %s"), *OriginLocation.ToString())
@@ -276,7 +277,7 @@ bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVect
 	}
 
 	Cells.Emplace(InitialCellKey, InitialCell);
-	Cells[InitialCellKey].CombustionState = 1.f;
+	Cells[InitialCellKey].CombustionState = 0.f;
 	EdgeCells.Emplace(InitialCellKey);
 
 	FireLocations.Emplace(OriginLocation);
@@ -285,7 +286,7 @@ bool AFireSource::StartFireAtCell(const FIntVector2& InitialCellKey, const FVect
 	MARK_PROPERTY_DIRTY_FROM_NAME(AFireSource, NewFireLocations, this);
 	UpdateFireLocations();
 	
-	PrepareImmediateInitialCells(InitialCellKey, OriginLocation, COQP);
+	PrepareImmediateInitialCells(InitialCellKey, OriginLocation);
 	
 	return true;
 }
@@ -424,9 +425,6 @@ void AFireSource::CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult)
 		CurrentBatchSize = FMath::Min(IgnitedCellsNum - BatchStartIndex, BaseBatchSize);
 		TFuture<TMap<FIntVector2, FFireCell>> Future = Async(EAsyncExecution::ThreadPool, [this, &IgnitedCellsArray, BatchStartIndex, CurrentBatchSize]()
 		{
-			FCollisionObjectQueryParams COQP;
-			COQP.AddObjectTypesToQuery(COLLISION_COMBUSTIBLE);
-			
 			TMap<FIntVector2, FFireCell> BatchResult;
 			BatchResult.Reserve(CurrentBatchSize * 4); // in general, a cell has 3 pending neighbors, but corner cells can have 5 
 			int End = BatchStartIndex + CurrentBatchSize;
@@ -439,8 +437,12 @@ void AFireSource::CreateNewFireCells(FAsyncFireSpreadResult& AggregatedResult)
 					if (!Cells.Contains(TestCellIndex))
 					{
 						FFireCell NewCell;
-						FVector NeighborLocation = Cells[IgnitedCellIndex].Location + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
-						GetCell(NeighborLocation, COQP, NewCell);
+						FVector IgnitorLocation = Cells[IgnitedCellIndex].Location;
+						// if (Cells[IgnitedCellIndex].CombustibleActor.IsValid())
+						// 	IgnitorLocation -= FVector::UpVector * Cells[IgnitedCellIndex].GetCombustibleActorHeight();
+						
+						FVector NeighborLocation = IgnitorLocation + FVector(RadialDirection.X, RadialDirection.Y, 0) * FireCellSize;
+						GetCell(NeighborLocation, NewCell);
 						BatchResult.Emplace(TestCellIndex, NewCell);
 					}
 				}
@@ -568,37 +570,32 @@ void AFireSource::SpreadFireBatch(const TArray<FIntVector2>& EdgeCellsBatch, int
 		{
 			FIntVector2 TestCellIndex = EdgeCellIndex + Direction;
 			if (!ensure(Cells.Contains(TestCellIndex)))
-			{
-// #if WITH_EDITOR
-				// FString LogString = FString::Printf(TEXT("Cell [%d, %d] doesnt exist for edge cell [%d, %d]"), TestCellIndex.X, TestCellIndex.Y, EdgeCellIndex.X, EdgeCellIndex.Y);
-				// FIRESIM_LOG_ASYNC(LogString, Warning);
-// #endif
 				continue;
-			}
+
+			bool bCombustible = IsCombustible(Cells[TestCellIndex], Cells[EdgeCellIndex]);
+			if (!bCombustible)
+				continue;
 			
-			if (IsCombustible(Cells[TestCellIndex], Cells[EdgeCellIndex]))
+			constexpr float MinWindEffect = 0.1f;
+			// it can be that cell dot product between burner->burnee and wind can be negative, so clamp by some small value to reduce the effect of burning against wind
+			const float WindEffect = WindStrength > WindEffectActivationThreshold
+				? FMath::Max(MinWindEffect, WindStrength * (Cells[TestCellIndex].Location - Cells[EdgeCellIndex].Location).GetSafeNormal() | WindDirection)
+				: MinWindEffect;
+			
+			// 1. spreading fire by edge cells
+			float DeltaTime = AccumulatedDeltaTime.load(); // i'm not sure if this is a good idea
+			float CombustIncrease = Combust(Cells[TestCellIndex], DeltaTime, WindEffect);
+
+			// 2.1 mark for add newly ignited cells to edge cells
+			if (Cells[TestCellIndex].IsIgnited())
+				BatchResult.IgnitedCells.Emplace(TestCellIndex);
+
+			// 2.2 aggregate combustion increase for actors that have combustible interface.
+			// actor's individual combustion state != individual cell combustion state
+			if (Cells[TestCellIndex].bHasCombustibleInterface && !BatchResult.CombustionActorUpdates.Contains(TestCellIndex))
 			{
-				constexpr float MinWindEffect = 0.1f;
-				// it can be that cell dot product between burner->burnee and wind can be negative, so clamp by some small value to reduce the effect of burning against wind
-				const float WindEffect = WindStrength > WindEffectActivationThreshold
-					? FMath::Max(MinWindEffect, WindStrength * (Cells[TestCellIndex].Location - Cells[EdgeCellIndex].Location).GetSafeNormal() | WindDirection)
-					: MinWindEffect;
-				
-				// 1. spreading fire by edge cells
-				float DeltaTime = AccumulatedDeltaTime.load(); // i'm not sure if this is a good idea
-				float CombustIncrease = Combust(Cells[TestCellIndex], DeltaTime, WindEffect);
-
-				// 2.1 mark for add newly ignited cells to edge cells
-				if (Cells[TestCellIndex].IsIgnited())
-					BatchResult.IgnitedCells.Emplace(TestCellIndex);
-
-				// 2.2 aggregate combustion increase for actors that have combustible interface.
-				// actor's individual combustion state != individual cell combustion state
-				if (Cells[TestCellIndex].bHasCombustibleInterface && !BatchResult.CombustionActorUpdates.Contains(TestCellIndex))
-				{
-					float& AggregatedIncrease = BatchResult.CombustionActorUpdates.FindOrAdd(TestCellIndex);
-					AggregatedIncrease += CombustIncrease;
-				}
+				float& AggregatedIncrease = BatchResult.CombustionActorUpdates.FindOrAdd(TestCellIndex);
+				AggregatedIncrease += CombustIncrease;
 			}
 		}
 
@@ -710,12 +707,6 @@ void AFireSource::OnSomethingLeftFireVolume(UPrimitiveComponent* OverlappedCompo
 
 float AFireSource::Combust(FFireCell& Cell, float DeltaTime, float WindEffect)
 {
-	// {
-		// FScopeLock Lock(&Cell.CombustionLock);
-		// ensure(DeltaTime * WindEffect * Cell.CombustionRate >= 0.f);
-		// Cell.CombustionState += DeltaTime * WindEffect * Cell.CombustionRate;
-	// }
-
 	const float Increase = DeltaTime * WindEffect * Cell.CombustionRate; 
 	ensure(Increase >= 0.f);
 	Cell.CombustionState.fetch_add(Increase);
