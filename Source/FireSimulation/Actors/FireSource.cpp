@@ -182,6 +182,7 @@ void AFireSource::UpdateBurningActors()
 		Index++;
 	}
 
+	LastBurningActorUpdateIndex = Index;
 	if (Index >= PendingBurningActorsUpdates.Num())
 	{
 		PendingBurningActorsUpdates.Empty();
@@ -192,9 +193,12 @@ void AFireSource::UpdateBurningActors()
 bool AFireSource::GetCell(const FVector& LocationBase, const FCollisionObjectQueryParams& COQP,
                           FFireCell& OutCell) const
 {
+	// ok. current issue with this function: it gets new cell for a requesting cell. but the same cell can be an obstacle for 1 cell and a valid cell for another cell
+	// for example, if 1 cell if lower than other, it might consider it an obstacle as unreacheable, or if the cell is higher that the other
+	// but at the same time there can be other neighbor cells that are on the same level
+	// so perhaps the fact is a cell is an obstacle shouldn't be decided here, and instead tested individually cell by cell
+	
 	FHitResult Hit;
-	// TODO TraceBase.Z should be average neighbor Z instead of LocationBase.Z because they can differ a lot
-	// FVector TraceBase = LocationBase + FVector(CellIndex.X * FireCellSize, CellIndex.Y * FireCellSize, 0);
 	FCollisionShape SweepShape = FCollisionShape::MakeBox(FVector(FireCellSize * .5f, FireCellSize * .5f, BaseFireStrength * 0.5f));
 	FVector SweepStart = LocationBase + FVector::UpVector * BaseFireStrength;
 	FVector SweepEnd = LocationBase - FVector::UpVector * FireDownwardPropagationThreshold;

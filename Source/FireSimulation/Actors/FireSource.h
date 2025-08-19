@@ -68,10 +68,6 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
 	int FireSpreadLimit = 2000;
 
-	// this is square root, so if this value is 30, then 30 * 30 = 900 cells will be cached
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
-	int PreCacheCellCount = 250;
-
 	// don't update more than this amount of actor that are burning per tick
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, meta=(UIMin = 1, ClampMin = 1))
 	int MaxActorsUpdatesPerTick = 100;
