@@ -1,3 +1,7 @@
+Demostration (click to watch) 
+
+[![Demonstration:](https://img.youtube.com/vi/SPrskvpUDhI/0.jpg)](https://youtu.be/SPrskvpUDhI)
+
 Fire is managed by an actor BP_FireSource. It must be placed on level. The fire is spreading in a cellular automata (i guess) fashion - there’s first fire cell, and then it just generates 8 cells around itself and burns them.
 
 The fire source actor has some properties to control the simulation: 
