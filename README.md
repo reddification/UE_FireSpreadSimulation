@@ -1,4 +1,5 @@
-Demostration (click to watch) 
+Demostration (or click thumbnail to watch) 
+https://youtu.be/SPrskvpUDhI
 
 [![Demonstration:](https://img.youtube.com/vi/SPrskvpUDhI/0.jpg)](https://youtu.be/SPrskvpUDhI)
 
